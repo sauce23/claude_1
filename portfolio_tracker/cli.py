@@ -1,30 +1,40 @@
 import sys
 
 from . import storage
-from .display import show_comparison, show_portfolio, show_targets
-from .models import Portfolio
+from .display import (
+    refresh_prices,
+    show_comparison,
+    show_live_dashboard,
+    show_portfolio,
+    show_targets,
+    watch_portfolio,
+)
+from .models import VALID_MARKETS, Portfolio
 
 HELP_TEXT = """
 Portfolio Tracker — Commands:
 
   Holdings:
-    add <symbol> <shares> <price>   Add shares (accumulates if existing)
-    set <symbol> <shares> <price>   Set exact shares & price (overwrites)
-    remove <symbol>                 Remove a holding entirely
-    price <symbol> <price>          Update price for a holding
+    add <symbol> <shares> [market]    Add shares (market: US or ASX, default US)
+    set <symbol> <shares> [market]    Set exact shares (overwrites)
+    remove <symbol>                   Remove a holding entirely
 
   Targets:
-    target <symbol> <pct>           Set target allocation % for a symbol
-    rmtarget <symbol>               Remove a target
+    target <symbol> <pct>             Set target allocation % for a symbol
+    rmtarget <symbol>                 Remove a target
+
+  Prices:
+    refresh                           Fetch live prices for all holdings
+    watch [interval]                  Live dashboard with auto-refresh (default 30s)
 
   Views:
-    show                            Show current portfolio
-    targets                         Show target allocations
-    compare                         Compare actual vs target allocations
+    show                              Show current portfolio
+    targets                           Show target allocations
+    compare                           Compare actual vs target allocations
 
   Other:
-    help                            Show this help message
-    quit / exit                     Save and exit
+    help                              Show this help message
+    quit / exit                       Save and exit
 """
 
 
@@ -36,11 +46,22 @@ def _parse_float(val: str, name: str) -> float | None:
         return None
 
 
+def _parse_market(val: str) -> str | None:
+    val = val.upper()
+    if val not in VALID_MARKETS:
+        print(f"Error: market must be one of {VALID_MARKETS}, got '{val}'")
+        return None
+    return val
+
+
 def run(data_file: str | None = None):
     kwargs = {"path": data_file} if data_file else {}
     portfolio = storage.load(**kwargs)
 
-    print("Portfolio Tracker")
+    def _save():
+        storage.save(portfolio, **kwargs)
+
+    print("Portfolio Tracker (with live prices)")
     print("Type 'help' for commands, 'quit' to exit.\n")
 
     while True:
@@ -64,31 +85,65 @@ def run(data_file: str | None = None):
             print(HELP_TEXT)
 
         elif cmd == "add":
-            if len(args) != 3:
-                print("Usage: add <symbol> <shares> <price>")
+            if len(args) < 2 or len(args) > 3:
+                print("Usage: add <symbol> <shares> [market]")
+                print("  market: US (default) or ASX")
                 continue
             shares = _parse_float(args[1], "shares")
-            price = _parse_float(args[2], "price")
-            if shares is None or price is None:
+            if shares is None:
                 continue
+            market = "US"
+            if len(args) == 3:
+                market = _parse_market(args[2])
+                if market is None:
+                    continue
             symbol = args[0].upper()
-            portfolio.add_holding(symbol, shares, price)
-            print(f"Added {shares:g} shares of {symbol} @ ${price:,.2f}")
-            storage.save(portfolio, **kwargs)
+            # Fetch live price on add
+            print(f"Fetching live price for {symbol} ({market})...")
+            from .prices import fetch_quote
+            quote = fetch_quote(symbol, market)
+            if quote:
+                price = quote.price
+                currency = "AUD" if market == "ASX" else "USD"
+                prefix = "A$" if currency == "AUD" else "$"
+                portfolio.add_holding(symbol, shares, price, market)
+                print(f"Added {shares:g} shares of {symbol} @ {prefix}{price:,.2f} ({market})")
+            else:
+                print(f"Could not fetch price for {symbol}. Adding with price $0.00")
+                print("Use 'refresh' later or 'price <symbol> <price>' to set manually.")
+                portfolio.add_holding(symbol, shares, 0.0, market)
+            _save()
 
         elif cmd == "set":
-            if len(args) != 3:
-                print("Usage: set <symbol> <shares> <price>")
+            if len(args) < 2 or len(args) > 3:
+                print("Usage: set <symbol> <shares> [market]")
                 continue
             shares = _parse_float(args[1], "shares")
-            price = _parse_float(args[2], "price")
-            if shares is None or price is None:
+            if shares is None:
                 continue
+            market = "US"
+            if len(args) == 3:
+                market = _parse_market(args[2])
+                if market is None:
+                    continue
             symbol = args[0].upper()
+            print(f"Fetching live price for {symbol} ({market})...")
+            from .prices import fetch_quote
+            quote = fetch_quote(symbol, market)
+            if quote:
+                price = quote.price
+                currency = "AUD" if market == "ASX" else "USD"
+                prefix = "A$" if currency == "AUD" else "$"
+            else:
+                price = 0.0
+                prefix = "$"
+                print(f"Could not fetch price. Setting price to $0.00")
             from .models import Holding
-            portfolio.holdings[symbol] = Holding(symbol=symbol, shares=shares, price=price)
-            print(f"Set {symbol} to {shares:g} shares @ ${price:,.2f}")
-            storage.save(portfolio, **kwargs)
+            portfolio.holdings[symbol] = Holding(
+                symbol=symbol, shares=shares, price=price, market=market
+            )
+            print(f"Set {symbol} to {shares:g} shares @ {prefix}{price:,.2f} ({market})")
+            _save()
 
         elif cmd == "remove":
             if len(args) != 1:
@@ -97,7 +152,7 @@ def run(data_file: str | None = None):
             symbol = args[0].upper()
             if portfolio.remove_holding(symbol):
                 print(f"Removed {symbol}")
-                storage.save(portfolio, **kwargs)
+                _save()
             else:
                 print(f"{symbol} not found in portfolio")
 
@@ -111,7 +166,7 @@ def run(data_file: str | None = None):
             symbol = args[0].upper()
             if portfolio.update_price(symbol, price):
                 print(f"Updated {symbol} price to ${price:,.2f}")
-                storage.save(portfolio, **kwargs)
+                _save()
             else:
                 print(f"{symbol} not found in portfolio")
 
@@ -126,7 +181,7 @@ def run(data_file: str | None = None):
             portfolio.set_target(symbol, pct)
             total = portfolio.targets_total()
             print(f"Set {symbol} target to {pct:.1f}% (targets total: {total:.1f}%)")
-            storage.save(portfolio, **kwargs)
+            _save()
 
         elif cmd == "rmtarget":
             if len(args) != 1:
@@ -135,7 +190,7 @@ def run(data_file: str | None = None):
             symbol = args[0].upper()
             if portfolio.remove_target(symbol):
                 print(f"Removed target for {symbol}")
-                storage.save(portfolio, **kwargs)
+                _save()
             else:
                 print(f"No target found for {symbol}")
 
@@ -147,6 +202,30 @@ def run(data_file: str | None = None):
 
         elif cmd == "compare":
             show_comparison(portfolio)
+
+        elif cmd == "refresh":
+            if not portfolio.holdings:
+                print("No holdings to refresh.")
+                continue
+            print("Fetching live prices...")
+            quotes = refresh_prices(portfolio)
+            if quotes:
+                _save()
+                show_live_dashboard(portfolio, quotes)
+            else:
+                print("Could not fetch any prices. Check your connection.")
+
+        elif cmd == "watch":
+            if not portfolio.holdings:
+                print("No holdings to watch.")
+                continue
+            interval = 30
+            if args:
+                parsed = _parse_float(args[0], "interval")
+                if parsed is None:
+                    continue
+                interval = max(10, int(parsed))  # minimum 10s
+            watch_portfolio(portfolio, interval=interval, save_fn=_save)
 
         else:
             print(f"Unknown command: {cmd}. Type 'help' for available commands.")

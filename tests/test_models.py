@@ -1,12 +1,20 @@
 import unittest
 
-from portfolio_tracker.models import Holding, Portfolio
+from portfolio_tracker.models import Holding, Portfolio, VALID_MARKETS
 
 
 class TestHolding(unittest.TestCase):
     def test_value(self):
         h = Holding("AAPL", shares=10, price=150.0)
         self.assertAlmostEqual(h.value, 1500.0)
+
+    def test_default_market(self):
+        h = Holding("AAPL", shares=10, price=150.0)
+        self.assertEqual(h.market, "US")
+
+    def test_asx_market(self):
+        h = Holding("CBA", shares=10, price=100.0, market="ASX")
+        self.assertEqual(h.market, "ASX")
 
     def test_to_dict_from_dict(self):
         h = Holding("AAPL", shares=10, price=150.0)
@@ -15,6 +23,17 @@ class TestHolding(unittest.TestCase):
         self.assertEqual(h.symbol, h2.symbol)
         self.assertEqual(h.shares, h2.shares)
         self.assertEqual(h.price, h2.price)
+        self.assertEqual(h.market, h2.market)
+
+    def test_to_dict_includes_market(self):
+        h = Holding("CBA", shares=5, price=110.0, market="ASX")
+        d = h.to_dict()
+        self.assertEqual(d["market"], "ASX")
+
+    def test_from_dict_missing_market_defaults_us(self):
+        d = {"symbol": "AAPL", "shares": 10, "price": 150.0}
+        h = Holding.from_dict(d)
+        self.assertEqual(h.market, "US")
 
 
 class TestPortfolio(unittest.TestCase):
@@ -31,6 +50,14 @@ class TestPortfolio(unittest.TestCase):
         self.p.add_holding("AAPL", 5, 155.0)
         self.assertEqual(self.p.holdings["AAPL"].shares, 15)
         self.assertEqual(self.p.holdings["AAPL"].price, 155.0)
+
+    def test_add_holding_with_market(self):
+        self.p.add_holding("CBA", 100, 110.0, market="ASX")
+        self.assertEqual(self.p.holdings["CBA"].market, "ASX")
+
+    def test_add_holding_default_market(self):
+        self.p.add_holding("AAPL", 10, 150.0)
+        self.assertEqual(self.p.holdings["AAPL"].market, "US")
 
     def test_remove_holding(self):
         self.p.add_holding("AAPL", 10, 150.0)
@@ -78,26 +105,39 @@ class TestPortfolio(unittest.TestCase):
         self.assertTrue(self.p.update_shares("AAPL", 20))
         self.assertEqual(self.p.holdings["AAPL"].shares, 20)
 
+    def test_symbols_with_markets(self):
+        self.p.add_holding("AAPL", 10, 150.0, market="US")
+        self.p.add_holding("CBA", 50, 110.0, market="ASX")
+        pairs = self.p.symbols_with_markets()
+        self.assertIn(("AAPL", "US"), pairs)
+        self.assertIn(("CBA", "ASX"), pairs)
+
     def test_roundtrip_serialization(self):
         self.p.add_holding("AAPL", 10, 150.0)
-        self.p.add_holding("GOOG", 5, 2800.0)
+        self.p.add_holding("CBA", 50, 110.0, market="ASX")
         self.p.set_target("AAPL", 30.0)
-        self.p.set_target("GOOG", 70.0)
+        self.p.set_target("CBA", 70.0)
 
         d = self.p.to_dict()
         p2 = Portfolio.from_dict(d)
 
         self.assertEqual(len(p2.holdings), 2)
         self.assertAlmostEqual(p2.holdings["AAPL"].shares, 10)
-        self.assertAlmostEqual(p2.holdings["GOOG"].price, 2800.0)
+        self.assertAlmostEqual(p2.holdings["CBA"].price, 110.0)
+        self.assertEqual(p2.holdings["CBA"].market, "ASX")
+        self.assertEqual(p2.holdings["AAPL"].market, "US")
         self.assertEqual(p2.targets["AAPL"], 30.0)
-        self.assertEqual(p2.targets["GOOG"], 70.0)
+        self.assertEqual(p2.targets["CBA"], 70.0)
 
     def test_case_insensitive_symbols(self):
         self.p.add_holding("aapl", 10, 100.0)
         self.assertIn("AAPL", self.p.holdings)
         self.p.set_target("goog", 50.0)
         self.assertIn("GOOG", self.p.targets)
+
+    def test_case_insensitive_market(self):
+        self.p.add_holding("CBA", 10, 100.0, market="asx")
+        self.assertEqual(self.p.holdings["CBA"].market, "ASX")
 
 
 class TestPortfolioComparison(unittest.TestCase):
@@ -116,6 +156,20 @@ class TestPortfolioComparison(unittest.TestCase):
         # GOOG is underweight: 25% actual vs 50% target
         diff_goog = p.actual_pct("GOOG") - p.targets["GOOG"]
         self.assertAlmostEqual(diff_goog, -25.0)
+
+    def test_mixed_markets(self):
+        p = Portfolio()
+        p.add_holding("AAPL", 10, 150.0, market="US")    # $1500
+        p.add_holding("CBA", 20, 100.0, market="ASX")    # $2000
+        self.assertAlmostEqual(p.total_value, 3500.0)
+        self.assertAlmostEqual(p.actual_pct("AAPL"), (1500 / 3500) * 100)
+        self.assertAlmostEqual(p.actual_pct("CBA"), (2000 / 3500) * 100)
+
+
+class TestValidMarkets(unittest.TestCase):
+    def test_valid_markets_contains_us_and_asx(self):
+        self.assertIn("US", VALID_MARKETS)
+        self.assertIn("ASX", VALID_MARKETS)
 
 
 if __name__ == "__main__":
