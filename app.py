@@ -180,21 +180,40 @@ def _portfolio_summary_text() -> str:
     )
 
 
+def _resolve_symbol(sym: str) -> str:
+    """Fuzzy-match a symbol to the actual key in portfolio holdings.
+
+    Handles the common case where Claude omits or adds the '.AX' suffix.
+    """
+    sym = sym.upper()
+    if sym in portfolio.holdings:
+        return sym
+    # Try appending .AX (e.g. "NDQ" → "NDQ.AX")
+    if sym + ".AX" in portfolio.holdings:
+        return sym + ".AX"
+    # Try stripping .AX (e.g. "VONV.AX" → "VONV")
+    if sym.endswith(".AX") and sym[:-3] in portfolio.holdings:
+        return sym[:-3]
+    return sym  # return as-is; caller handles the miss
+
+
 def _run_agent_tool(name: str, inputs: dict, actions: list) -> str:
     if name == "get_portfolio":
         return _portfolio_summary_text()
 
     if name == "update_shares":
-        sym = inputs["symbol"].upper()
+        sym = _resolve_symbol(inputs["symbol"])
         shares = float(inputs["shares"])
         if portfolio.update_shares(sym, shares):
             _save(portfolio)
             actions.append(f"Updated {sym} to {shares:g} shares")
             return f"Updated {sym} to {shares:g} shares"
-        return f"Error: {sym} not found"
+        return f"Error: {sym} not found in portfolio. Known symbols: {', '.join(sorted(portfolio.holdings))}"
 
     if name == "set_target":
-        sym = inputs["symbol"].upper()
+        sym = _resolve_symbol(inputs["symbol"])
+        if sym not in portfolio.holdings:
+            return f"Error: {sym} not found in portfolio. Known symbols: {', '.join(sorted(portfolio.holdings))}"
         pct = float(inputs["target_pct"])
         portfolio.set_target(sym, pct)
         _save(portfolio)
@@ -221,7 +240,7 @@ def _run_agent_tool(name: str, inputs: dict, actions: list) -> str:
         return f"Error: no valid price for {sym}"
 
     if name == "remove_holding":
-        sym = inputs["symbol"].upper()
+        sym = _resolve_symbol(inputs["symbol"])
         if portfolio.remove_holding(sym):
             portfolio.remove_target(sym)
             _save(portfolio)
@@ -589,6 +608,7 @@ with chat_col:
                 reply = st.write_stream(_agent_stream(st.session_state.chat_history, actions))
 
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
-        if actions:
-            st.session_state.portfolio = _load()
+        # Always sync the in-memory portfolio from disk so the next turn's
+        # system prompt reflects any updates the agent just made.
+        st.session_state.portfolio = _load()
         st.rerun()
