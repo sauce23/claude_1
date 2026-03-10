@@ -1,0 +1,49 @@
+{
+  "holdings": {
+    "AAPL": {
+      "symbol": "AAPL",
+      "shares": 10,
+      "price": 215.5,
+      "exchange": "US"
+    },
+    "MSFT": {
+      "symbol": "MSFT",
+      "shares": 5,
+      "price": 380.0,
+      "exchange": "US"
+    },
+    "NVDA": {
+      "symbol": "NVDA",
+      "shares": 8,
+      "price": 875.0,
+      "exchange": "US"
+    },
+    "BHP.AX": {
+      "symbol": "BHP.AX",
+      "shares": 200,
+      "price": 44.5,
+      "exchange": "ASX"
+    },
+    "CBA.AX": {
+      "symbol": "CBA.AX",
+      "shares": 50,
+      "price": 128.0,
+      "exchange": "ASX"
+    },
+    "CSL.AX": {
+      "symbol": "CSL.AX",
+      "shares": 15,
+      "price": 295.0,
+      "exchange": "ASX"
+    }
+  },
+  "targets": {
+    "AAPL": 20.0,
+    "MSFT": 15.0,
+    "NVDA": 15.0,
+    "BHP.AX": 20.0,
+    "CBA.AX": 15.0,
+    "CSL.AX": 15.0
+  },
+  "aud_usd_rate": 0.635
+}
