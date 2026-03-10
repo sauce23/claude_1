@@ -29,6 +29,16 @@ class Holding:
     def value(self) -> float:
         return self.shares * self.price
 
+    def value_aud(self, aud_usd_rate: float = 1.0) -> float:
+        """Return holding value converted to AUD.
+
+        ASX holdings are already priced in AUD; US holdings are divided by the
+        AUD/USD rate to convert from USD to AUD.
+        """
+        if self.exchange == "ASX":
+            return self.value
+        return self.value / aud_usd_rate
+
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol,
@@ -59,6 +69,12 @@ class Portfolio:
     def total_value(self) -> float:
         return sum(h.value for h in self.holdings.values())
 
+    @property
+    def total_value_aud(self) -> float:
+        """Total portfolio value in AUD, converting US holdings via aud_usd_rate."""
+        rate = self.aud_usd_rate or 1.0
+        return sum(h.value_aud(rate) for h in self.holdings.values())
+
     def total_value_by_exchange(self) -> dict[str, float]:
         totals: dict[str, float] = {}
         for h in self.holdings.values():
@@ -66,6 +82,7 @@ class Portfolio:
         return totals
 
     def actual_pct(self, symbol: str) -> float:
+        """Allocation % by raw value — only accurate within a single currency."""
         total = self.total_value
         if total == 0:
             return 0.0
@@ -73,6 +90,22 @@ class Portfolio:
         if not holding:
             return 0.0
         return (holding.value / total) * 100
+
+    def actual_pct_aud(self, symbol: str, total_aud: float | None = None) -> float:
+        """Allocation % normalised to AUD — correct for mixed USD/AUD portfolios.
+
+        Pass a pre-computed *total_aud* to avoid redundant summation when
+        calling this for multiple symbols in a tight loop.
+        """
+        if total_aud is None:
+            total_aud = self.total_value_aud
+        if total_aud == 0:
+            return 0.0
+        holding = self.holdings.get(symbol)
+        if not holding:
+            return 0.0
+        rate = self.aud_usd_rate or 1.0
+        return (holding.value_aud(rate) / total_aud) * 100
 
     def actual_pct_within_exchange(self, symbol: str) -> float:
         holding = self.holdings.get(symbol)
