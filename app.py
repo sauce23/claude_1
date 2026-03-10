@@ -493,9 +493,15 @@ with left_col:
             if abs(new_shares - h.shares) > 1e-9:
                 portfolio.update_shares(symbol, new_shares)
                 _save(portfolio)
+                # Rerun so Value (AUD), Actual %, and portfolio totals
+                # are recalculated from the updated share count immediately.
+                st.rerun()
             if abs(new_target - current_target) > 1e-9:
                 portfolio.set_target(symbol, new_target)
                 _save(portfolio)
+                # Rerun so the Actual vs Target chart reflects the new
+                # target in the same interaction.
+                st.rerun()
 
             # Delete confirmation inline
             if st.session_state.get(f"confirm_del_{symbol}"):
@@ -616,13 +622,14 @@ with chat_col:
                 reply = full_text
 
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
-        # Reload portfolio from disk so the next turn's system prompt is current.
-        st.session_state.portfolio = _load()
-        # Clear widget session-state for all editable cells so their values
-        # reinitialise from the freshly loaded portfolio on the next render.
-        # Without this, Streamlit's inline-edit detection sees the stale widget
-        # value as a "user change" and immediately reverts the agent's update.
-        for k in list(st.session_state.keys()):
-            if k.startswith("tgt_") or k.startswith("sh_"):
-                del st.session_state[k]
+        # Reload portfolio from disk so the next render and system prompt are current.
+        fresh = _load()
+        st.session_state.portfolio = fresh
+        # Explicitly sync widget state to the fresh portfolio values.
+        # Simply deleting keys is unreliable — Streamlit may not reinitialise
+        # the widget from `value=` in the same render cycle, so the stale
+        # frontend value wins and immediately reverts the agent's changes.
+        for symbol, h in fresh.holdings.items():
+            st.session_state[f"sh_{symbol}"] = float(h.shares)
+            st.session_state[f"tgt_{symbol}"] = float(fresh.targets.get(symbol, 0.0))
         st.rerun()
