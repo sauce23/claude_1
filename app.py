@@ -180,21 +180,40 @@ def _portfolio_summary_text() -> str:
     )
 
 
+def _resolve_symbol(sym: str) -> str:
+    """Fuzzy-match a symbol to the actual key in portfolio holdings.
+
+    Handles the common case where Claude omits or adds the '.AX' suffix.
+    """
+    sym = sym.upper()
+    if sym in portfolio.holdings:
+        return sym
+    # Try appending .AX (e.g. "NDQ" → "NDQ.AX")
+    if sym + ".AX" in portfolio.holdings:
+        return sym + ".AX"
+    # Try stripping .AX (e.g. "VONV.AX" → "VONV")
+    if sym.endswith(".AX") and sym[:-3] in portfolio.holdings:
+        return sym[:-3]
+    return sym  # return as-is; caller handles the miss
+
+
 def _run_agent_tool(name: str, inputs: dict, actions: list) -> str:
     if name == "get_portfolio":
         return _portfolio_summary_text()
 
     if name == "update_shares":
-        sym = inputs["symbol"].upper()
+        sym = _resolve_symbol(inputs["symbol"])
         shares = float(inputs["shares"])
         if portfolio.update_shares(sym, shares):
             _save(portfolio)
             actions.append(f"Updated {sym} to {shares:g} shares")
             return f"Updated {sym} to {shares:g} shares"
-        return f"Error: {sym} not found"
+        return f"Error: {sym} not found in portfolio. Known symbols: {', '.join(sorted(portfolio.holdings))}"
 
     if name == "set_target":
-        sym = inputs["symbol"].upper()
+        sym = _resolve_symbol(inputs["symbol"])
+        if sym not in portfolio.holdings:
+            return f"Error: {sym} not found in portfolio. Known symbols: {', '.join(sorted(portfolio.holdings))}"
         pct = float(inputs["target_pct"])
         portfolio.set_target(sym, pct)
         _save(portfolio)
@@ -221,7 +240,7 @@ def _run_agent_tool(name: str, inputs: dict, actions: list) -> str:
         return f"Error: no valid price for {sym}"
 
     if name == "remove_holding":
-        sym = inputs["symbol"].upper()
+        sym = _resolve_symbol(inputs["symbol"])
         if portfolio.remove_holding(sym):
             portfolio.remove_target(sym)
             _save(portfolio)
@@ -232,18 +251,20 @@ def _run_agent_tool(name: str, inputs: dict, actions: list) -> str:
     return f"Unknown tool: {name}"
 
 
-def _call_claude_agent(chat_history: list) -> tuple[str, list]:
+def _agent_stream(chat_history: list, actions: list):
+    """Generator that streams text chunks; executes tool calls silently."""
     try:
         import anthropic as ant
     except ImportError:
-        return "Install the `anthropic` package: `pip install anthropic`", []
+        yield "Install the `anthropic` package: `pip install anthropic`"
+        return
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return "Set the `ANTHROPIC_API_KEY` environment variable to enable Claude.", []
+        yield "Set the `ANTHROPIC_API_KEY` environment variable to enable Claude."
+        return
 
     client = ant.Anthropic(api_key=api_key)
-    actions: list[str] = []
 
     thesis_section = ""
     if st.session_state.investment_thesis:
@@ -255,7 +276,7 @@ def _call_claude_agent(chat_history: list) -> tuple[str, list]:
             + "\n--- END THESIS ---"
         )
 
-    system = (
+    system_text = (
         "You are a portfolio management assistant for an Australian investor managing an ETF portfolio.\n\n"
         "Current portfolio (all values in AUD):\n"
         + _portfolio_summary_text()
@@ -264,27 +285,42 @@ def _call_claude_agent(chat_history: list) -> tuple[str, list]:
         "ASX stocks use .AX suffix; US stock prices are in USD, ASX in AUD. "
         "Targets should sum to 100%."
     )
+    # Cache the system prompt — avoids reprocessing the full portfolio context
+    # on every streaming request, cutting time-to-first-token significantly.
+    system = [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
 
     api_messages = [{"role": m["role"], "content": m["content"]} for m in chat_history]
 
     for _ in range(8):
-        response = client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=2048,
-            thinking={"type": "adaptive"},
-            system=system,
-            tools=_AGENT_TOOLS,
-            messages=api_messages,
-        )
+        in_tool_block = False
 
-        if response.stop_reason == "end_turn":
-            text = next((b.text for b in response.content if b.type == "text"), "Done.")
-            return text, actions
+        try:
+            with client.messages.stream(
+                model="claude-haiku-4-5",
+                max_tokens=1024,
+                system=system,
+                tools=_AGENT_TOOLS,
+                messages=api_messages,
+            ) as stream:
+                for event in stream:
+                    if event.type == "content_block_start":
+                        in_tool_block = (event.content_block.type == "tool_use")
+                    elif event.type == "content_block_delta":
+                        if not in_tool_block and event.delta.type == "text_delta":
+                            yield event.delta.text
 
-        if response.stop_reason == "tool_use":
-            api_messages.append({"role": "assistant", "content": response.content})
+                final_msg = stream.get_final_message()
+        except Exception as e:
+            yield f"\n\n_Error: {e}_"
+            return
+
+        if final_msg.stop_reason == "end_turn":
+            return
+
+        if final_msg.stop_reason == "tool_use":
+            api_messages.append({"role": "assistant", "content": final_msg.content})
             tool_results = []
-            for block in response.content:
+            for block in final_msg.content:
                 if block.type == "tool_use":
                     result = _run_agent_tool(block.name, block.input, actions)
                     tool_results.append({
@@ -294,9 +330,7 @@ def _call_claude_agent(chat_history: list) -> tuple[str, list]:
                     })
             api_messages.append({"role": "user", "content": tool_results})
         else:
-            break
-
-    return "Request processed.", actions
+            return
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 
@@ -568,10 +602,22 @@ with chat_col:
 
     if prompt := st.chat_input("e.g. 'Am I overweight in NDQ?' or 'Add 10 VHY.AX'"):
         st.session_state.chat_history.append({"role": "user", "content": prompt})
-        with st.spinner("Thinking…"):
-            reply, actions = _call_claude_agent(st.session_state.chat_history)
+        actions: list[str] = []
+
+        with messages_area:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            with st.chat_message("assistant"):
+                placeholder = st.empty()
+                full_text = ""
+                for chunk in _agent_stream(st.session_state.chat_history, actions):
+                    full_text += chunk
+                    placeholder.markdown(full_text + "▌")
+                placeholder.markdown(full_text)
+                reply = full_text
+
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
-        if actions:
-            # Reload portfolio to reflect agent's mutations
-            st.session_state.portfolio = _load()
+        # Always sync the in-memory portfolio from disk so the next turn's
+        # system prompt reflects any updates the agent just made.
+        st.session_state.portfolio = _load()
         st.rerun()
