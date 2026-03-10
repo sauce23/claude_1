@@ -32,6 +32,8 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "investment_thesis" not in st.session_state:
     st.session_state.investment_thesis = ""
+if "thesis_filename" not in st.session_state:
+    st.session_state.thesis_filename = ""
 
 portfolio: Portfolio = st.session_state.portfolio
 
@@ -39,20 +41,7 @@ portfolio: Portfolio = st.session_state.portfolio
 
 def _value_aud(h: Holding) -> float:
     """Convert holding value to AUD."""
-    if h.exchange == "ASX":
-        return h.value
-    rate = portfolio.aud_usd_rate or 1.0
-    return h.value / rate  # USD → AUD
-
-def _total_aud() -> float:
-    return sum(_value_aud(h) for h in portfolio.holdings.values())
-
-def _actual_pct_aud(symbol: str) -> float:
-    total = _total_aud()
-    if total == 0:
-        return 0.0
-    h = portfolio.holdings.get(symbol)
-    return (_value_aud(h) / total * 100) if h else 0.0
+    return h.value_aud(portfolio.aud_usd_rate or 1.0)
 
 def _refresh_prices(symbol: str | None = None):
     try:
@@ -161,17 +150,17 @@ def _portfolio_summary_text() -> str:
     if not portfolio.holdings:
         return "Portfolio is empty."
     rate = portfolio.aud_usd_rate or 1.0
+    total_aud = portfolio.total_value_aud  # compute once
     lines = []
     for sym, h in sorted(portfolio.holdings.items()):
         val_aud = _value_aud(h)
         target = portfolio.targets.get(sym, 0.0)
-        actual = _actual_pct_aud(sym)
+        actual = portfolio.actual_pct_aud(sym, total_aud)
         currency_label = "AUD" if h.exchange == "ASX" else "USD"
         lines.append(
             f"  {sym} ({h.exchange}): {h.shares:g} shares @ {h.price:,.2f} {currency_label}"
             f" = A${val_aud:,.2f} | actual {actual:.1f}%, target {target:.1f}%, diff {target - actual:+.1f}%"
         )
-    total_aud = _total_aud()
     return (
         "\n".join(lines)
         + f"\n\nTotal (AUD): A${total_aud:,.2f}"
@@ -221,7 +210,7 @@ def _run_agent_tool(name: str, inputs: dict, actions: list) -> str:
         return f"Set {sym} target to {pct:.1f}%"
 
     if name == "add_holding":
-        sym = inputs["symbol"].upper()
+        sym = _resolve_symbol(inputs["symbol"])
         shares = float(inputs["shares"])
         price = float(inputs.get("price", 0))
         if price == 0:
@@ -233,6 +222,13 @@ def _run_agent_tool(name: str, inputs: dict, actions: list) -> str:
             except Exception as e:
                 return f"Error fetching price for {sym}: {e}"
         if price > 0:
+            if sym in portfolio.holdings:
+                # SET shares/price for existing holding — do not accumulate
+                portfolio.update_shares(sym, shares)
+                portfolio.update_price(sym, price)
+                _save(portfolio)
+                actions.append(f"Updated {sym}: {shares:g} shares @ {price:,.2f}")
+                return f"Updated {sym}: {shares:g} shares at {price:,.2f}"
             portfolio.add_holding(sym, shares, price)
             _save(portfolio)
             actions.append(f"Added {shares:g} × {sym} @ {price:,.2f}")
@@ -381,10 +377,11 @@ with st.sidebar:
         label_visibility="collapsed",
         help="PDF or Word document",
     )
-    if thesis_file:
+    if thesis_file and thesis_file.name != st.session_state.thesis_filename:
         text = _extract_thesis_text(thesis_file)
         if text.strip():
             st.session_state.investment_thesis = text
+            st.session_state.thesis_filename = thesis_file.name
             st.success(f"Loaded ({len(text):,} chars)")
         else:
             st.warning("Could not extract text from file.")
@@ -393,6 +390,7 @@ with st.sidebar:
         st.caption(f"✅ Thesis active — {len(st.session_state.investment_thesis):,} chars")
         if st.button("Clear thesis", use_container_width=True):
             st.session_state.investment_thesis = ""
+            st.session_state.thesis_filename = ""
             st.rerun()
 
 # ── Main layout: portfolio (left) + chat (right) ───────────────────────────────
@@ -435,6 +433,7 @@ with left_col:
 
     exchanges = sorted(totals.keys())
     COL_W = [1.5, 0.85, 0.85, 1.1, 0.7, 0.7, 0.32, 0.32]
+    total_aud = portfolio.total_value_aud  # compute once — avoids O(n²) per-row summation
 
     for exchange in exchanges:
         ex_holdings = {s: h for s, h in portfolio.holdings.items() if h.exchange == exchange}
@@ -451,7 +450,7 @@ with left_col:
         for symbol in sorted(ex_holdings):
             h = ex_holdings[symbol]
             val_aud = _value_aud(h)
-            actual = _actual_pct_aud(symbol)
+            actual = portfolio.actual_pct_aud(symbol, total_aud)
             current_target = float(portfolio.targets.get(symbol, 0.0))
 
             row = st.columns(COL_W)
@@ -536,7 +535,7 @@ with left_col:
         all_symbols = sorted(
             set(list(portfolio.holdings.keys()) + list(portfolio.targets.keys()))
         )
-        actual_vals = [_actual_pct_aud(s) for s in all_symbols]
+        actual_vals = [portfolio.actual_pct_aud(s, total_aud) for s in all_symbols]
         target_vals = [portfolio.targets.get(s, 0.0) for s in all_symbols]
 
         fig2 = go.Figure()
@@ -555,7 +554,7 @@ with left_col:
             st.markdown("**Rebalance suggestions**")
             rebal_rows = []
             for sym in all_symbols:
-                diff_pct = portfolio.targets.get(sym, 0.0) - _actual_pct_aud(sym)
+                diff_pct = portfolio.targets.get(sym, 0.0) - portfolio.actual_pct_aud(sym, total_aud)
                 diff_val = (diff_pct / 100) * total_aud
                 if abs(diff_val) > 0.01:
                     rebal_rows.append({
@@ -617,7 +616,13 @@ with chat_col:
                 reply = full_text
 
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
-        # Always sync the in-memory portfolio from disk so the next turn's
-        # system prompt reflects any updates the agent just made.
+        # Reload portfolio from disk so the next turn's system prompt is current.
         st.session_state.portfolio = _load()
+        # Clear widget session-state for all editable cells so their values
+        # reinitialise from the freshly loaded portfolio on the next render.
+        # Without this, Streamlit's inline-edit detection sees the stale widget
+        # value as a "user change" and immediately reverts the agent's update.
+        for k in list(st.session_state.keys()):
+            if k.startswith("tgt_") or k.startswith("sh_"):
+                del st.session_state[k]
         st.rerun()

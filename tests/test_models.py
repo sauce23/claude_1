@@ -188,5 +188,70 @@ class TestPortfolioComparison(unittest.TestCase):
         self.assertAlmostEqual(diff_goog, -25.0)
 
 
+class TestHoldingValueAUD(unittest.TestCase):
+    def test_asx_holding_value_aud_unchanged(self):
+        h = Holding("BHP.AX", shares=100, price=45.0)  # A$4500
+        self.assertAlmostEqual(h.value_aud(0.65), 4500.0)
+
+    def test_us_holding_value_aud_converts(self):
+        # $100 USD / 0.65 = A$153.85
+        h = Holding("AAPL", shares=1, price=100.0)
+        self.assertAlmostEqual(h.value_aud(0.65), 100.0 / 0.65, places=4)
+
+    def test_us_holding_value_aud_default_rate(self):
+        # rate=1.0 means USD == AUD (neutral)
+        h = Holding("AAPL", shares=1, price=200.0)
+        self.assertAlmostEqual(h.value_aud(), 200.0)
+
+
+class TestPortfolioAUDMethods(unittest.TestCase):
+    def _mixed_portfolio(self) -> Portfolio:
+        p = Portfolio()
+        p.aud_usd_rate = 0.5  # 1 AUD = 0.50 USD → A$1 = US$0.50 → US$100 = A$200
+        p.add_holding("AAPL", shares=1, price=100.0)   # US$100 → A$200
+        p.add_holding("BHP.AX", shares=1, price=300.0)  # A$300
+        return p
+
+    def test_total_value_aud(self):
+        p = self._mixed_portfolio()
+        # US$100 / 0.5 = A$200 + A$300 = A$500
+        self.assertAlmostEqual(p.total_value_aud, 500.0)
+
+    def test_actual_pct_aud_us_holding(self):
+        p = self._mixed_portfolio()
+        # AAPL = A$200 / A$500 = 40%
+        self.assertAlmostEqual(p.actual_pct_aud("AAPL"), 40.0)
+
+    def test_actual_pct_aud_asx_holding(self):
+        p = self._mixed_portfolio()
+        # BHP.AX = A$300 / A$500 = 60%
+        self.assertAlmostEqual(p.actual_pct_aud("BHP.AX"), 60.0)
+
+    def test_actual_pct_aud_sums_to_100(self):
+        p = self._mixed_portfolio()
+        total_pct = p.actual_pct_aud("AAPL") + p.actual_pct_aud("BHP.AX")
+        self.assertAlmostEqual(total_pct, 100.0)
+
+    def test_actual_pct_aud_unknown_symbol(self):
+        p = self._mixed_portfolio()
+        self.assertAlmostEqual(p.actual_pct_aud("UNKNOWN"), 0.0)
+
+    def test_actual_pct_aud_precomputed_total(self):
+        p = self._mixed_portfolio()
+        total = p.total_value_aud
+        # Verify that passing total_aud gives identical result to not passing it
+        self.assertAlmostEqual(
+            p.actual_pct_aud("AAPL", total),
+            p.actual_pct_aud("AAPL"),
+        )
+
+    def test_actual_pct_differs_from_naive_for_mixed(self):
+        """actual_pct() is wrong for mixed portfolios; actual_pct_aud() is correct."""
+        p = self._mixed_portfolio()
+        # naive actual_pct uses raw values: US$100 + A$300 = 400 (nonsensical mix)
+        # correct answer for AAPL allocation is 40% (AUD-normalised)
+        self.assertNotAlmostEqual(p.actual_pct("AAPL"), p.actual_pct_aud("AAPL"))
+
+
 if __name__ == "__main__":
     unittest.main()

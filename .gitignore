@@ -1,2 +1,25 @@
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Build artefacts
+dist/
+build/
+*.egg-info/
