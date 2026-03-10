@@ -276,7 +276,7 @@ def _agent_stream(chat_history: list, actions: list):
             + "\n--- END THESIS ---"
         )
 
-    system = (
+    system_text = (
         "You are a portfolio management assistant for an Australian investor managing an ETF portfolio.\n\n"
         "Current portfolio (all values in AUD):\n"
         + _portfolio_summary_text()
@@ -285,6 +285,9 @@ def _agent_stream(chat_history: list, actions: list):
         "ASX stocks use .AX suffix; US stock prices are in USD, ASX in AUD. "
         "Targets should sum to 100%."
     )
+    # Cache the system prompt — avoids reprocessing the full portfolio context
+    # on every streaming request, cutting time-to-first-token significantly.
+    system = [{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}]
 
     api_messages = [{"role": m["role"], "content": m["content"]} for m in chat_history]
 
@@ -293,7 +296,7 @@ def _agent_stream(chat_history: list, actions: list):
 
         try:
             with client.messages.stream(
-                model="claude-sonnet-4-6",
+                model="claude-haiku-4-5",
                 max_tokens=1024,
                 system=system,
                 tools=_AGENT_TOOLS,
@@ -605,7 +608,13 @@ with chat_col:
             with st.chat_message("user"):
                 st.markdown(prompt)
             with st.chat_message("assistant"):
-                reply = st.write_stream(_agent_stream(st.session_state.chat_history, actions))
+                placeholder = st.empty()
+                full_text = ""
+                for chunk in _agent_stream(st.session_state.chat_history, actions):
+                    full_text += chunk
+                    placeholder.markdown(full_text + "▌")
+                placeholder.markdown(full_text)
+                reply = full_text
 
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
         # Always sync the in-memory portfolio from disk so the next turn's
