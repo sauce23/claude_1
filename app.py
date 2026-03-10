@@ -493,9 +493,15 @@ with left_col:
             if abs(new_shares - h.shares) > 1e-9:
                 portfolio.update_shares(symbol, new_shares)
                 _save(portfolio)
+                # Rerun so Value (AUD), Actual %, and portfolio totals
+                # are recalculated from the updated share count immediately.
+                st.rerun()
             if abs(new_target - current_target) > 1e-9:
                 portfolio.set_target(symbol, new_target)
                 _save(portfolio)
+                # Rerun so the Actual vs Target chart reflects the new
+                # target in the same interaction.
+                st.rerun()
 
             # Delete confirmation inline
             if st.session_state.get(f"confirm_del_{symbol}"):
