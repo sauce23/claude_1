@@ -617,7 +617,13 @@ with chat_col:
                 reply = full_text
 
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
-        # Always sync the in-memory portfolio from disk so the next turn's
-        # system prompt reflects any updates the agent just made.
+        # Reload portfolio from disk so the next turn's system prompt is current.
         st.session_state.portfolio = _load()
+        # Clear widget session-state for all editable cells so their values
+        # reinitialise from the freshly loaded portfolio on the next render.
+        # Without this, Streamlit's inline-edit detection sees the stale widget
+        # value as a "user change" and immediately reverts the agent's update.
+        for k in list(st.session_state.keys()):
+            if k.startswith("tgt_") or k.startswith("sh_"):
+                del st.session_state[k]
         st.rerun()
