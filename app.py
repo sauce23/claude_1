@@ -315,3 +315,229 @@ with right:
                 st.dataframe(pd.DataFrame(rebal_rows), hide_index=True, use_container_width=True)
             else:
                 st.success("Portfolio is on target!")
+
+# ── Claude Chat Agent ──────────────────────────────────────────────────────────
+
+_AGENT_TOOLS = [
+    {
+        "name": "get_portfolio",
+        "description": "Get the current portfolio state with all holdings, prices, values, and target allocations",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "update_shares",
+        "description": "Update the number of shares for an existing holding",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Ticker symbol (e.g. VHY.AX, NDQ.AX, VONV)"},
+                "shares": {"type": "number", "description": "New total number of shares"},
+            },
+            "required": ["symbol", "shares"],
+        },
+    },
+    {
+        "name": "set_target",
+        "description": "Set the target allocation percentage for a holding",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Ticker symbol"},
+                "target_pct": {"type": "number", "description": "Target percentage (0-100)"},
+            },
+            "required": ["symbol", "target_pct"],
+        },
+    },
+    {
+        "name": "add_holding",
+        "description": "Add a new holding or update an existing one",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Ticker symbol (use .AX suffix for ASX stocks, e.g. VHY.AX)"},
+                "shares": {"type": "number", "description": "Number of shares"},
+                "price": {"type": "number", "description": "Price per share in local currency (0 to attempt live fetch)"},
+            },
+            "required": ["symbol", "shares"],
+        },
+    },
+    {
+        "name": "remove_holding",
+        "description": "Remove a holding from the portfolio",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string", "description": "Ticker symbol to remove"},
+            },
+            "required": ["symbol"],
+        },
+    },
+]
+
+
+def _portfolio_summary_text() -> str:
+    if not portfolio.holdings:
+        return "Portfolio is empty."
+    lines = []
+    for sym, h in sorted(portfolio.holdings.items()):
+        target = portfolio.targets.get(sym, 0.0)
+        actual = portfolio.actual_pct(sym)
+        lines.append(
+            f"  {sym} ({h.exchange}): {h.shares:g} shares @ {h.price:,.2f} {h.currency}"
+            f" = {h.value:,.2f} {h.currency} | actual {actual:.1f}%, target {target:.1f}%,"
+            f" diff {target - actual:+.1f}%"
+        )
+    totals = portfolio.total_value_by_exchange()
+    summary = "\n".join(lines)
+    summary += f"\n\nASX total (AUD): {totals.get('ASX', 0):,.2f}"
+    summary += f"\nUS total (USD):  {totals.get('US', 0):,.2f}"
+    if portfolio.aud_usd_rate:
+        summary += f"\nAUD/USD rate: {portfolio.aud_usd_rate:.4f}"
+    summary += f"\nTargets sum: {portfolio.targets_total():.1f}%"
+    return summary
+
+
+def _run_agent_tool(name: str, inputs: dict, actions: list) -> str:
+    if name == "get_portfolio":
+        return _portfolio_summary_text()
+
+    if name == "update_shares":
+        symbol = inputs["symbol"].upper()
+        shares = float(inputs["shares"])
+        if portfolio.update_shares(symbol, shares):
+            _save(portfolio)
+            actions.append(f"Updated {symbol} to {shares:g} shares")
+            return f"Updated {symbol} to {shares:g} shares"
+        return f"Error: {symbol} not found in portfolio"
+
+    if name == "set_target":
+        symbol = inputs["symbol"].upper()
+        pct = float(inputs["target_pct"])
+        portfolio.set_target(symbol, pct)
+        _save(portfolio)
+        actions.append(f"Set {symbol} target to {pct:.1f}%")
+        return f"Set {symbol} target to {pct:.1f}%"
+
+    if name == "add_holding":
+        symbol = inputs["symbol"].upper()
+        shares = float(inputs["shares"])
+        price = float(inputs.get("price", 0))
+        if price == 0:
+            try:
+                from portfolio_tracker.prices import fetch_prices
+                exchange = _detect_exchange(symbol)
+                dummy = {symbol: Holding(symbol=symbol, shares=1, price=0, exchange=exchange)}
+                result = fetch_prices(dummy)
+                price = result.get(symbol) or 0
+            except Exception as e:
+                return f"Error fetching price for {symbol}: {e}. Please provide a price."
+        if price > 0:
+            portfolio.add_holding(symbol, shares, price)
+            _save(portfolio)
+            actions.append(f"Added {shares:g} × {symbol} @ {price:,.2f}")
+            return f"Added {shares:g} shares of {symbol} at {price:,.2f}"
+        return f"Error: no valid price available for {symbol}"
+
+    if name == "remove_holding":
+        symbol = inputs["symbol"].upper()
+        if portfolio.remove_holding(symbol):
+            portfolio.remove_target(symbol)
+            _save(portfolio)
+            actions.append(f"Removed {symbol}")
+            return f"Removed {symbol} from portfolio"
+        return f"Error: {symbol} not found"
+
+    return f"Unknown tool: {name}"
+
+
+def _call_claude_agent(chat_history: list) -> tuple[str, list]:
+    """Run the agentic loop for one user turn. Returns (response_text, actions_taken)."""
+    try:
+        import anthropic as ant
+    except ImportError:
+        return "Install the `anthropic` package to enable this feature: `pip install anthropic`", []
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return (
+            "Set the `ANTHROPIC_API_KEY` environment variable to enable the Claude assistant.",
+            [],
+        )
+
+    client = ant.Anthropic(api_key=api_key)
+    actions: list[str] = []
+
+    system = f"""You are a portfolio management assistant helping an Australian investor manage their ETF portfolio.
+
+Current portfolio state:
+{_portfolio_summary_text()}
+
+Use the provided tools to read or update the portfolio when asked.
+- ASX stocks use the .AX suffix (VHY.AX, NDQ.AX, etc.)
+- US stocks have no suffix (VONV, VONG)
+- ASX prices are in AUD; US prices are in USD
+- Targets should sum to 100%"""
+
+    # Build API messages from plain text chat history
+    api_messages = [{"role": m["role"], "content": m["content"]} for m in chat_history]
+
+    for _ in range(8):
+        response = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=2048,
+            thinking={"type": "adaptive"},
+            system=system,
+            tools=_AGENT_TOOLS,
+            messages=api_messages,
+        )
+
+        if response.stop_reason == "end_turn":
+            text = next((b.text for b in response.content if b.type == "text"), "Done.")
+            return text, actions
+
+        if response.stop_reason == "tool_use":
+            # Preserve full content (including thinking blocks) for tool-use turns
+            api_messages.append({"role": "assistant", "content": response.content})
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    result = _run_agent_tool(block.name, block.input, actions)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+            api_messages.append({"role": "user", "content": tool_results})
+        else:
+            break
+
+    return "Request processed.", actions
+
+
+st.divider()
+st.subheader("🤖 Claude Portfolio Assistant")
+st.caption("Ask Claude to update holdings, change targets, or summarise your portfolio.")
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []  # [{"role": "user"/"assistant", "content": str}]
+
+for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+if prompt := st.chat_input("e.g. 'Set NDQ target to 25%' or 'How underweight am I in VONV?'"):
+    st.session_state.chat_history.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking…"):
+            reply, actions = _call_claude_agent(st.session_state.chat_history)
+        st.markdown(reply)
+        for action in actions:
+            st.success(f"✅ {action}")
+
+    st.session_state.chat_history.append({"role": "assistant", "content": reply})
+
+    if actions:
+        st.rerun()

@@ -1,49 +1,77 @@
 {
   "holdings": {
-    "AAPL": {
-      "symbol": "AAPL",
-      "shares": 10,
-      "price": 215.5,
-      "exchange": "US"
-    },
-    "MSFT": {
-      "symbol": "MSFT",
-      "shares": 5,
-      "price": 380.0,
-      "exchange": "US"
-    },
-    "NVDA": {
-      "symbol": "NVDA",
+    "VONV": {
+      "symbol": "VONV",
       "shares": 8,
-      "price": 875.0,
+      "price": 86.35,
       "exchange": "US"
     },
-    "BHP.AX": {
-      "symbol": "BHP.AX",
-      "shares": 200,
-      "price": 44.5,
+    "VONG": {
+      "symbol": "VONG",
+      "shares": 19,
+      "price": 104.72,
+      "exchange": "US"
+    },
+    "VHY.AX": {
+      "symbol": "VHY.AX",
+      "shares": 16,
+      "price": 81.90,
       "exchange": "ASX"
     },
-    "CBA.AX": {
-      "symbol": "CBA.AX",
-      "shares": 50,
-      "price": 128.0,
+    "VGE.AX": {
+      "symbol": "VGE.AX",
+      "shares": 29,
+      "price": 85.61,
       "exchange": "ASX"
     },
-    "CSL.AX": {
-      "symbol": "CSL.AX",
-      "shares": 15,
-      "price": 295.0,
+    "VEU.AX": {
+      "symbol": "VEU.AX",
+      "shares": 26,
+      "price": 108.45,
+      "exchange": "ASX"
+    },
+    "VEFI.AX": {
+      "symbol": "VEFI.AX",
+      "shares": 101,
+      "price": 43.09,
+      "exchange": "ASX"
+    },
+    "VAE.AX": {
+      "symbol": "VAE.AX",
+      "shares": 16,
+      "price": 95.60,
+      "exchange": "ASX"
+    },
+    "NDQ.AX": {
+      "symbol": "NDQ.AX",
+      "shares": 67,
+      "price": 51.99,
+      "exchange": "ASX"
+    },
+    "IIND.AX": {
+      "symbol": "IIND.AX",
+      "shares": 217,
+      "price": 9.91,
+      "exchange": "ASX"
+    },
+    "IEU.AX": {
+      "symbol": "IEU.AX",
+      "shares": 26,
+      "price": 96.44,
       "exchange": "ASX"
     }
   },
   "targets": {
-    "AAPL": 20.0,
-    "MSFT": 15.0,
-    "NVDA": 15.0,
-    "BHP.AX": 20.0,
-    "CBA.AX": 15.0,
-    "CSL.AX": 15.0
+    "VONV": 8.0,
+    "VONG": 10.0,
+    "VHY.AX": 5.0,
+    "VGE.AX": 7.0,
+    "VEU.AX": 10.0,
+    "VEFI.AX": 20.0,
+    "VAE.AX": 5.0,
+    "NDQ.AX": 20.0,
+    "IIND.AX": 5.0,
+    "IEU.AX": 10.0
   },
   "aud_usd_rate": 0.635
 }
