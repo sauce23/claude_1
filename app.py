@@ -232,18 +232,20 @@ def _run_agent_tool(name: str, inputs: dict, actions: list) -> str:
     return f"Unknown tool: {name}"
 
 
-def _call_claude_agent(chat_history: list) -> tuple[str, list]:
+def _agent_stream(chat_history: list, actions: list):
+    """Generator that streams text chunks; executes tool calls silently."""
     try:
         import anthropic as ant
     except ImportError:
-        return "Install the `anthropic` package: `pip install anthropic`", []
+        yield "Install the `anthropic` package: `pip install anthropic`"
+        return
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return "Set the `ANTHROPIC_API_KEY` environment variable to enable Claude.", []
+        yield "Set the `ANTHROPIC_API_KEY` environment variable to enable Claude."
+        return
 
     client = ant.Anthropic(api_key=api_key)
-    actions: list[str] = []
 
     thesis_section = ""
     if st.session_state.investment_thesis:
@@ -268,23 +270,35 @@ def _call_claude_agent(chat_history: list) -> tuple[str, list]:
     api_messages = [{"role": m["role"], "content": m["content"]} for m in chat_history]
 
     for _ in range(8):
-        response = client.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=2048,
-            thinking={"type": "adaptive"},
-            system=system,
-            tools=_AGENT_TOOLS,
-            messages=api_messages,
-        )
+        in_tool_block = False
 
-        if response.stop_reason == "end_turn":
-            text = next((b.text for b in response.content if b.type == "text"), "Done.")
-            return text, actions
+        try:
+            with client.messages.stream(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                system=system,
+                tools=_AGENT_TOOLS,
+                messages=api_messages,
+            ) as stream:
+                for event in stream:
+                    if event.type == "content_block_start":
+                        in_tool_block = (event.content_block.type == "tool_use")
+                    elif event.type == "content_block_delta":
+                        if not in_tool_block and event.delta.type == "text_delta":
+                            yield event.delta.text
 
-        if response.stop_reason == "tool_use":
-            api_messages.append({"role": "assistant", "content": response.content})
+                final_msg = stream.get_final_message()
+        except Exception as e:
+            yield f"\n\n_Error: {e}_"
+            return
+
+        if final_msg.stop_reason == "end_turn":
+            return
+
+        if final_msg.stop_reason == "tool_use":
+            api_messages.append({"role": "assistant", "content": final_msg.content})
             tool_results = []
-            for block in response.content:
+            for block in final_msg.content:
                 if block.type == "tool_use":
                     result = _run_agent_tool(block.name, block.input, actions)
                     tool_results.append({
@@ -294,9 +308,7 @@ def _call_claude_agent(chat_history: list) -> tuple[str, list]:
                     })
             api_messages.append({"role": "user", "content": tool_results})
         else:
-            break
-
-    return "Request processed.", actions
+            return
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 
@@ -568,10 +580,15 @@ with chat_col:
 
     if prompt := st.chat_input("e.g. 'Am I overweight in NDQ?' or 'Add 10 VHY.AX'"):
         st.session_state.chat_history.append({"role": "user", "content": prompt})
-        with st.spinner("Thinking…"):
-            reply, actions = _call_claude_agent(st.session_state.chat_history)
+        actions: list[str] = []
+
+        with messages_area:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            with st.chat_message("assistant"):
+                reply = st.write_stream(_agent_stream(st.session_state.chat_history, actions))
+
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
         if actions:
-            # Reload portfolio to reflect agent's mutations
             st.session_state.portfolio = _load()
         st.rerun()
