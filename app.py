@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 import pandas as pd
 
 from portfolio_tracker import storage
+from portfolio_tracker import db as _db
 from portfolio_tracker.models import Holding, Portfolio, _detect_exchange
 
 st.set_page_config(
@@ -16,15 +17,15 @@ st.set_page_config(
     layout="wide",
 )
 
-DATA_FILE = os.path.join(os.path.dirname(__file__), "portfolio.json")
+DB_FILE = os.path.join(os.path.dirname(__file__), "portfolio.db")
 
 # ── Session state ──────────────────────────────────────────────────────────────
 
 def _load() -> Portfolio:
-    return storage.load(DATA_FILE)
+    return _db.load(DB_FILE)
 
 def _save(p: Portfolio):
-    storage.save(p, DATA_FILE)
+    _db.save(p, DB_FILE)
 
 if "portfolio" not in st.session_state:
     st.session_state.portfolio = _load()
@@ -34,6 +35,8 @@ if "investment_thesis" not in st.session_state:
     st.session_state.investment_thesis = ""
 if "thesis_filename" not in st.session_state:
     st.session_state.thesis_filename = ""
+if "_widget_gen" not in st.session_state:
+    st.session_state["_widget_gen"] = 0
 
 portfolio: Portfolio = st.session_state.portfolio
 
@@ -42,6 +45,21 @@ portfolio: Portfolio = st.session_state.portfolio
 def _value_aud(h: Holding) -> float:
     """Convert holding value to AUD."""
     return h.value_aud(portfolio.aud_usd_rate or 1.0)
+
+# ── Inline-edit callbacks ───────────────────────────────────────────────────────
+# These are called by Streamlit ONLY on real user interactions, never on
+# programmatic reruns — which is what makes them immune to the stale-browser-
+# value race that plagued the old abs(new - current) comparison approach.
+
+def _cb_save_shares(symbol: str, key: str):
+    new_val = float(st.session_state[key])
+    portfolio.update_shares(symbol, new_val)
+    _db.update_shares(symbol, new_val, DB_FILE)
+
+def _cb_save_target(symbol: str, key: str):
+    new_val = float(st.session_state[key])
+    portfolio.set_target(symbol, new_val)
+    _db.update_target(symbol, new_val, DB_FILE)
 
 def _refresh_prices(symbol: str | None = None):
     try:
@@ -434,6 +452,9 @@ with left_col:
     exchanges = sorted(totals.keys())
     COL_W = [1.5, 0.85, 0.85, 1.1, 0.7, 0.7, 0.32, 0.32]
     total_aud = portfolio.total_value_aud  # compute once — avoids O(n²) per-row summation
+    # Widget generation: incremented after every agent update so widgets
+    # reinitialise from value= (fresh portfolio) rather than stale browser state.
+    wgen = st.session_state["_widget_gen"]
 
     for exchange in exchanges:
         ex_holdings = {s: h for s, h in portfolio.holdings.items() if h.exchange == exchange}
@@ -456,14 +477,17 @@ with left_col:
             row = st.columns(COL_W)
             row[0].markdown(f"**{symbol}**")
 
-            new_shares = row[1].number_input(
+            sh_key = f"sh_{symbol}_{wgen}"
+            row[1].number_input(
                 "shares",
                 value=float(h.shares),
                 min_value=0.0,
                 step=1.0,
-                key=f"sh_{symbol}",
+                key=sh_key,
                 label_visibility="collapsed",
                 format="%.4g",
+                on_change=_cb_save_shares,
+                args=(symbol, sh_key),
             )
             row[2].markdown(
                 f"<small>{h.price:,.2f}<br><span style='color:#888'>{h.currency}</span></small>",
@@ -472,48 +496,37 @@ with left_col:
             row[3].markdown(f"A${val_aud:,.0f}")
             row[4].markdown(f"{actual:.1f}%")
 
-            new_target = row[5].number_input(
+            tgt_key = f"tgt_{symbol}_{wgen}"
+            row[5].number_input(
                 "target",
                 value=current_target,
                 min_value=0.0,
                 max_value=100.0,
                 step=1.0,
-                key=f"tgt_{symbol}",
+                key=tgt_key,
                 label_visibility="collapsed",
                 format="%.1f",
+                on_change=_cb_save_target,
+                args=(symbol, tgt_key),
             )
 
-            if row[6].button("↻", key=f"ref_{symbol}", help=f"Refresh {symbol} price"):
+            if row[6].button("↻", key=f"ref_{symbol}_{wgen}", help=f"Refresh {symbol} price"):
                 _refresh_prices(symbol)
 
-            if row[7].button("🗑", key=f"del_{symbol}", help=f"Delete {symbol}"):
+            if row[7].button("🗑", key=f"del_{symbol}_{wgen}", help=f"Delete {symbol}"):
                 st.session_state[f"confirm_del_{symbol}"] = True
-
-            # Apply inline edits
-            if abs(new_shares - h.shares) > 1e-9:
-                portfolio.update_shares(symbol, new_shares)
-                _save(portfolio)
-                # Rerun so Value (AUD), Actual %, and portfolio totals
-                # are recalculated from the updated share count immediately.
-                st.rerun()
-            if abs(new_target - current_target) > 1e-9:
-                portfolio.set_target(symbol, new_target)
-                _save(portfolio)
-                # Rerun so the Actual vs Target chart reflects the new
-                # target in the same interaction.
-                st.rerun()
 
             # Delete confirmation inline
             if st.session_state.get(f"confirm_del_{symbol}"):
                 st.warning(f"⚠️ Delete **{symbol}**? This cannot be undone.")
                 c1, c2, _ = st.columns([1, 1, 4])
-                if c1.button("Yes, delete", key=f"yes_{symbol}", type="primary"):
+                if c1.button("Yes, delete", key=f"yes_{symbol}_{wgen}", type="primary"):
                     portfolio.remove_holding(symbol)
                     portfolio.remove_target(symbol)
                     _save(portfolio)
                     st.session_state.pop(f"confirm_del_{symbol}", None)
                     st.rerun()
-                if c2.button("Cancel", key=f"no_{symbol}"):
+                if c2.button("Cancel", key=f"no_{symbol}_{wgen}"):
                     st.session_state.pop(f"confirm_del_{symbol}", None)
                     st.rerun()
 
@@ -623,13 +636,9 @@ with chat_col:
 
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
         # Reload portfolio from disk so the next render and system prompt are current.
-        fresh = _load()
-        st.session_state.portfolio = fresh
-        # Explicitly sync widget state to the fresh portfolio values.
-        # Simply deleting keys is unreliable — Streamlit may not reinitialise
-        # the widget from `value=` in the same render cycle, so the stale
-        # frontend value wins and immediately reverts the agent's changes.
-        for symbol, h in fresh.holdings.items():
-            st.session_state[f"sh_{symbol}"] = float(h.shares)
-            st.session_state[f"tgt_{symbol}"] = float(fresh.targets.get(symbol, 0.0))
+        st.session_state.portfolio = _load()
+        # Bump widget generation so all number_inputs get fresh keys and
+        # reinitialise from value= (the updated portfolio) instead of the
+        # stale browser values that Streamlit would otherwise restore.
+        st.session_state["_widget_gen"] = st.session_state.get("_widget_gen", 0) + 1
         st.rerun()
