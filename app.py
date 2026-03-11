@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 import pandas as pd
 
 from portfolio_tracker import storage
+from portfolio_tracker import db as _db
 from portfolio_tracker.models import Holding, Portfolio, _detect_exchange
 
 st.set_page_config(
@@ -16,15 +17,15 @@ st.set_page_config(
     layout="wide",
 )
 
-DATA_FILE = os.path.join(os.path.dirname(__file__), "portfolio.json")
+DB_FILE = os.path.join(os.path.dirname(__file__), "portfolio.db")
 
 # ── Session state ──────────────────────────────────────────────────────────────
 
 def _load() -> Portfolio:
-    return storage.load(DATA_FILE)
+    return _db.load(DB_FILE)
 
 def _save(p: Portfolio):
-    storage.save(p, DATA_FILE)
+    _db.save(p, DB_FILE)
 
 if "portfolio" not in st.session_state:
     st.session_state.portfolio = _load()
@@ -53,12 +54,12 @@ def _value_aud(h: Holding) -> float:
 def _cb_save_shares(symbol: str, key: str):
     new_val = float(st.session_state[key])
     portfolio.update_shares(symbol, new_val)
-    _save(portfolio)
+    _db.update_shares(symbol, new_val, DB_FILE)
 
 def _cb_save_target(symbol: str, key: str):
     new_val = float(st.session_state[key])
     portfolio.set_target(symbol, new_val)
-    _save(portfolio)
+    _db.update_target(symbol, new_val, DB_FILE)
 
 def _refresh_prices(symbol: str | None = None):
     try:
