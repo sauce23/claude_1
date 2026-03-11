@@ -18,6 +18,8 @@ st.set_page_config(
 )
 
 DB_FILE = os.path.join(os.path.dirname(__file__), "portfolio.db")
+THESIS_FILE = os.path.join(os.path.dirname(__file__), "thesis.json")
+CHAT_FILE = os.path.join(os.path.dirname(__file__), "chat_history.json")
 
 # ── Session state ──────────────────────────────────────────────────────────────
 
@@ -27,14 +29,44 @@ def _load() -> Portfolio:
 def _save(p: Portfolio):
     _db.save(p, DB_FILE)
 
+def _load_thesis() -> tuple[str, str]:
+    """Return (text, filename) from thesis.json, or ('', '') if not found."""
+    if os.path.exists(THESIS_FILE):
+        import json
+        try:
+            data = json.loads(open(THESIS_FILE).read())
+            return data.get("text", ""), data.get("filename", "")
+        except Exception:
+            pass
+    return "", ""
+
+def _save_thesis(text: str, filename: str):
+    import json
+    with open(THESIS_FILE, "w") as f:
+        f.write(json.dumps({"text": text, "filename": filename}, indent=2))
+
+def _load_chat() -> list:
+    if os.path.exists(CHAT_FILE):
+        import json
+        try:
+            return json.loads(open(CHAT_FILE).read())
+        except Exception:
+            pass
+    return []
+
+def _save_chat(history: list):
+    import json
+    with open(CHAT_FILE, "w") as f:
+        f.write(json.dumps(history, indent=2))
+
 if "portfolio" not in st.session_state:
     st.session_state.portfolio = _load()
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
+    st.session_state.chat_history = _load_chat()
 if "investment_thesis" not in st.session_state:
-    st.session_state.investment_thesis = ""
-if "thesis_filename" not in st.session_state:
-    st.session_state.thesis_filename = ""
+    _thesis_text, _thesis_filename = _load_thesis()
+    st.session_state.investment_thesis = _thesis_text
+    st.session_state.thesis_filename = _thesis_filename
 if "_widget_gen" not in st.session_state:
     st.session_state["_widget_gen"] = 0
 
@@ -400,15 +432,27 @@ with st.sidebar:
         if text.strip():
             st.session_state.investment_thesis = text
             st.session_state.thesis_filename = thesis_file.name
+            _save_thesis(text, thesis_file.name)
             st.success(f"Loaded ({len(text):,} chars)")
         else:
             st.warning("Could not extract text from file.")
 
     if st.session_state.investment_thesis:
-        st.caption(f"✅ Thesis active — {len(st.session_state.investment_thesis):,} chars")
+        st.caption(f"✅ Thesis loaded — edit below, changes auto-save.")
+        edited = st.text_area(
+            "Edit thesis",
+            value=st.session_state.investment_thesis,
+            height=200,
+            label_visibility="collapsed",
+            key="thesis_editor",
+        )
+        if edited != st.session_state.investment_thesis:
+            st.session_state.investment_thesis = edited
+            _save_thesis(edited, st.session_state.thesis_filename)
         if st.button("Clear thesis", use_container_width=True):
             st.session_state.investment_thesis = ""
             st.session_state.thesis_filename = ""
+            _save_thesis("", "")
             st.rerun()
 
 # ── Main layout: portfolio (left) + chat (right) ───────────────────────────────
@@ -596,6 +640,7 @@ with chat_col:
     header_cols[0].subheader("🤖 Claude Assistant")
     if header_cols[1].button("Clear", key="clear_chat", help="Clear conversation"):
         st.session_state.chat_history = []
+        _save_chat([])
         st.rerun()
 
     if st.session_state.investment_thesis:
@@ -635,6 +680,7 @@ with chat_col:
                 reply = full_text
 
         st.session_state.chat_history.append({"role": "assistant", "content": reply})
+        _save_chat(st.session_state.chat_history)
         # Reload portfolio from disk so the next render and system prompt are current.
         st.session_state.portfolio = _load()
         # Bump widget generation so all number_inputs get fresh keys and
